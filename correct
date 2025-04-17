@@ -1,0 +1,34 @@
+def activate_rule(profile_key, rule):
+    """Activate a rule in target profile with correct parameter formatting"""
+    try:
+        # Base parameters for the API call
+        api_params = {
+            "key": profile_key,
+            "rule": rule['key'],
+            "severity": rule['severity'],
+            "reset": "false" # Keep existing parameters if rule already active
+        }
+
+        # Format rule-specific parameters correctly if they exist
+        if rule['params']:
+            param_string = ";".join([f"{p['key']}={p['value']}" for p in rule['params']])
+            api_params["params"] = param_string # Add the single 'params' string
+
+        response = requests.post(
+            f"{SONARQUBE_URL}/api/qualityprofiles/activate_rule",
+            params=api_params, # Use the corrected parameters dictionary
+            headers=HEADERS
+        )
+
+        # Check for HTTP errors and provide more context if activation fails
+        response.raise_for_status()
+        # Optional: Add a small success message per rule
+        # print(f"  ✅ Activated rule {rule['key']} with severity {rule['severity']}")
+
+    except requests.exceptions.RequestException as e:
+        # Print error message *and* the response body if available for better debugging
+        error_message = f"🚨 Failed to activate rule {rule['key']} in profile {profile_key}: {str(e)}"
+        if e.response is not None:
+            error_message += f"\n   Response Status: {e.response.status_code}"
+            error_message += f"\n   Response Body: {e.response.text}"
+        print(error_message)
