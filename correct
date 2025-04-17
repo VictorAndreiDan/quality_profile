@@ -1,3 +1,88 @@
+import requests
+import json
+import sys # For exiting on critical errors
+
+# --- Configuration ---
+SONARQUBE_URL = "http://your-sonarqube-url" # REQUIRED: Replace with your SonarQube URL
+BEARER_TOKEN = "your-bearer-token"          # REQUIRED: Replace with your Bearer Token
+HEADERS = {"Authorization": f"Bearer {BEARER_TOKEN}"}
+
+# REQUIRED: Replace with actual profile keys
+PROFILE1_KEY = "AXClVdvHplZJkqX4abcd"
+PROFILE2_KEY = "AXClVdvHplZJkqX4efgh"
+NEW_PROFILE_KEY = "AXClVdvHplZJkqX4ijkl" # Ensure this profile exists in SonarQube
+
+# --- Functions ---
+def get_profile_rules(profile_key):
+    """Get all activated rules from a profile with parameters"""
+    rules = []
+    page = 1
+    page_size = 500 # Max allowed by SonarQube API
+    print(f"  Fetching rules for profile: {profile_key}")
+    try:
+        while True:
+            params = {
+                "activation": "true",
+                "qprofile": profile_key,
+                "ps": page_size,
+                "p": page
+            }
+            response = requests.get(
+                f"{SONARQUBE_URL}/api/rules/search",
+                params=params,
+                headers=HEADERS,
+                timeout=30 # Add a timeout
+            )
+
+            # Check for HTTP errors
+            response.raise_for_status()
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                print(f"⚠️ Invalid JSON response for profile {profile_key}, page {page}")
+                print(f"Response content: {response.text}")
+                return None # Indicate failure
+
+            # Debug: Save raw API response (optional)
+            # try:
+            #     with open(f"debug_{profile_key}_page_{page}.json", "w") as f:
+            #         json.dump(data, f, indent=2)
+            # except IOError as e:
+            #      print(f"⚠️ Could not write debug file: {e}")
+
+            if 'rules' not in data:
+                print(f"⚠️ Unexpected response format for profile {profile_key} (missing 'rules' key)")
+                print(f"Response keys: {list(data.keys())}")
+                print(f"Response content: {response.text}")
+                return None # Indicate failure
+
+            for rule in data['rules']:
+                rules.append({
+                    "key": rule['key'],
+                    "severity": rule['severity'],
+                    # Ensure 'params' is always a list, even if missing or empty
+                    "params": rule.get('params', [])
+                })
+
+            total_rules = data.get('total', 0)
+            if page * page_size >= total_rules:
+                break
+            page += 1
+
+    except requests.exceptions.RequestException as e:
+        print(f"🚨 API request failed for profile {profile_key}: {str(e)}")
+        if e.response is not None:
+             print(f"   Response Status: {e.response.status_code}")
+             print(f"   Response Body: {e.response.text}")
+        return None # Indicate failure
+    except Exception as e:
+        print(f"🚨 An unexpected error occurred fetching rules for {profile_key}: {str(e)}")
+        return None # Indicate failure
+
+    print(f"  Found {len(rules)} activated rules in profile {profile_key}")
+    return rules
+
 def activate_rule(profile_key, rule):
     """Activate a rule in target profile with correct parameter formatting"""
     try:
@@ -6,24 +91,26 @@ def activate_rule(profile_key, rule):
             "key": profile_key,
             "rule": rule['key'],
             "severity": rule['severity'],
-            "reset": "false" # Keep existing parameters if rule already active
+            "reset": "false" # Keep existing parameters if rule already active and we are overriding
         }
 
-        # Format rule-specific parameters correctly if they exist
-        if rule['params']:
+        # Format rule-specific parameters correctly if they exist and are not empty
+        if rule.get('params'): # Check if params list exists and is not empty
             param_string = ";".join([f"{p['key']}={p['value']}" for p in rule['params']])
-            api_params["params"] = param_string # Add the single 'params' string
+            if param_string: # Ensure we don't add an empty 'params='
+                 api_params["params"] = param_string
 
         response = requests.post(
             f"{SONARQUBE_URL}/api/qualityprofiles/activate_rule",
             params=api_params, # Use the corrected parameters dictionary
-            headers=HEADERS
+            headers=HEADERS,
+            timeout=30 # Add a timeout
         )
 
         # Check for HTTP errors and provide more context if activation fails
         response.raise_for_status()
-        # Optional: Add a small success message per rule
-        # print(f"  ✅ Activated rule {rule['key']} with severity {rule['severity']}")
+        # print(f"  ✅ Activated rule {rule['key']}") # Uncomment for verbose success logs
+        return True # Indicate success
 
     except requests.exceptions.RequestException as e:
         # Print error message *and* the response body if available for better debugging
@@ -32,3 +119,59 @@ def activate_rule(profile_key, rule):
             error_message += f"\n   Response Status: {e.response.status_code}"
             error_message += f"\n   Response Body: {e.response.text}"
         print(error_message)
+        return False # Indicate failure
+    except Exception as e:
+        print(f"🚨 An unexpected error occurred activating rule {rule['key']}: {str(e)}")
+        return False # Indicate failure
+
+# --- Main Execution ---
+print("🚀 Starting SonarQube profile merge script...")
+
+# Get rules from first profile
+print("🔄 Fetching rules for first profile...")
+profile1_rules = get_profile_rules(PROFILE1_KEY)
+if profile1_rules is None:
+    print("❌ Critical error fetching rules from first profile. Exiting.")
+    sys.exit(1)
+
+
+# Get rules from second profile
+print("🔄 Fetching rules for second profile...")
+profile2_rules = get_profile_rules(PROFILE2_KEY)
+if profile2_rules is None:
+    print("❌ Critical error fetching rules from second profile. Exiting.")
+    sys.exit(1)
+
+# Combine rules using a dictionary to handle duplicates
+# Rules from profile2 will overwrite rules from profile1 if keys match
+print("🔄 Combining and de-duplicating rules...")
+all_rules_dict = {}
+for rule in profile1_rules:
+    all_rules_dict[rule['key']] = rule
+for rule in profile2_rules:
+    all_rules_dict[rule['key']] = rule # Overwrites if key exists
+
+merged_rules = list(all_rules_dict.values())
+print(f"🧩 Total unique rules to activate: {len(merged_rules)}")
+
+
+# Activate unique rules in the new profile
+print(f"⚡ Activating {len(merged_rules)} rules in profile {NEW_PROFILE_KEY}...")
+success_count = 0
+fail_count = 0
+for i, rule in enumerate(merged_rules):
+    print(f"  [{i+1}/{len(merged_rules)}] Activating rule: {rule['key']} ({rule['severity']})")
+    if activate_rule(NEW_PROFILE_KEY, rule):
+        success_count += 1
+    else:
+        fail_count += 1
+
+# --- Final Summary ---
+print("\n--- Summary ---")
+print(f"✅ Successfully activated: {success_count} rules.")
+if fail_count > 0:
+    print(f"🚨 Failed to activate: {fail_count} rules. Check logs above.")
+else:
+    print("✨ All rules processed successfully.")
+
+print(f"\n🏁 Profile combination process finished. Please verify the '{NEW_PROFILE_KEY}' profile in the SonarQube UI.")
